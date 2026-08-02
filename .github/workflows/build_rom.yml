@@ -1,0 +1,162 @@
+name: 📦 Build_HyperOS_Mod_Files
+
+on:
+  workflow_dispatch:
+    inputs:
+      rom_url:
+        description: 'HyperOS的ROM卡刷包链接'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Setup Environment
+        run: |
+          echo "=== 1. 初始化环境 ==="
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update -qq
+          sudo apt-get install -yqq aria2 p7zip-full
+          
+          # 赋予提取工具权限
+          chmod -R +x tools/
+
+      - name: Download ROM with Aria2
+        run: |
+          echo "📥 下载 ROM 中..."
+          aria2c -x16 -s16 -j$(nproc) -U "Mozilla/5.0" -d . "${{ github.event.inputs.rom_url }}" -o rom.zip
+
+      - name: Extract Payload and Target Partitions
+        run: |
+          echo "📦 提取 Payload..."
+          7z e rom.zip payload.bin > /dev/null
+          rm rom.zip
+          
+          echo "🛠️ 提取需要的四个分区: mi_ext,product,system,system_ext"
+          mkdir -p extracted_images
+          ./tools/payload_extract -s -o extracted_images -i payload.bin -X mi_ext,product,system,system_ext -T0
+          rm payload.bin
+
+      - name: Extract EROFS
+        run: |
+          echo "📂 解包 EROFS 镜像..."
+          mkdir -p mi_ext product system system_ext
+          
+          cd mi_ext && sudo ../tools/extract.erofs -i ../extracted_images/mi_ext.img -x -s && cd ..
+          cd product && sudo ../tools/extract.erofs -i ../extracted_images/product.img -x -s && cd ..
+          cd system && sudo ../tools/extract.erofs -i ../extracted_images/system.img -x -s && cd ..
+          cd system_ext && sudo ../tools/extract.erofs -i ../extracted_images/system_ext.img -x -s && cd ..
+          
+          sudo rm -rf extracted_images
+
+      - name: Parse mi_ext build.prop
+        id: read_props
+        run: |
+          echo "📖 读取 mi_ext/etc/build.prop 信息..."
+          PROP_FILE="mi_ext/etc/build.prop"
+          
+          # 设定默认值，防止由于找不到文件或属性导致空值
+          MOD_DEVICE="未知"
+          OS_VER="未知"
+          XMS_VER="未知"
+          
+          if [ -f "$PROP_FILE" ]; then
+            # 使用 grep 获取整行，cut 截取等号后面的值，tr 删除可能存在的 Windows 回车符 \r
+            VAL1=$(grep -m 1 "^ro.product.mod_device=" "$PROP_FILE" | cut -d'=' -f2 | tr -d '\r' || true)
+            [ -n "$VAL1" ] && MOD_DEVICE="$VAL1"
+            
+            VAL2=$(grep -m 1 "^ro.mi.os.version.incremental=" "$PROP_FILE" | cut -d'=' -f2 | tr -d '\r' || true)
+            [ -n "$VAL2" ] && OS_VER="$VAL2"
+            
+            VAL3=$(grep -m 1 "^ro.mi.xms.version.incremental=" "$PROP_FILE" | cut -d'=' -f2 | tr -d '\r' || true)
+            [ -n "$VAL3" ] && XMS_VER="$VAL3"
+          else
+            echo "⚠️ 警告：未找到 $PROP_FILE"
+          fi
+          
+          echo "获取到的信息："
+          echo "mod_device=$MOD_DEVICE"
+          echo "os_version=$OS_VER"
+          echo "xms_version=$XMS_VER"
+          
+          # 写入 Github Output，供后续步骤读取
+          echo "mod_device=$MOD_DEVICE" >> $GITHUB_OUTPUT
+          echo "os_ver=$OS_VER" >> $GITHUB_OUTPUT
+          echo "xms_ver=$XMS_VER" >> $GITHUB_OUTPUT
+
+      - name: Collect Specific Target Files
+        run: |
+          echo "🔍 收集指定的目标文件及文件夹..."
+          mkdir -p extracted_target
+          
+          # 提取 product 相关
+          sudo cp -r --parents product/etc/device_features extracted_target/ 2>/dev/null || true
+          sudo cp -r --parents product/etc/displayconfig extracted_target/ 2>/dev/null || true
+          sudo cp --parents product/overlay/AospFrameworkResOverlay.apk extracted_target/ 2>/dev/null || true
+          sudo cp --parents product/overlay/DevicesAndroidOverlay.apk extracted_target/ 2>/dev/null || true
+          sudo cp --parents product/overlay/DevicesOverlay.apk extracted_target/ 2>/dev/null || true
+          sudo cp --parents product/overlay/MiuiFrameworkResOverlay.apk extracted_target/ 2>/dev/null || true
+          sudo cp --parents product/overlay/MiuiFrameworkTelephonyResOverlay.apk extracted_target/ 2>/dev/null || true
+          sudo cp --parents product/overlay/SettingsRroDeviceTypeOverlay.apk extracted_target/ 2>/dev/null || true
+
+          # 提取 system 相关
+          sudo cp --parents system/system/bin/charger extracted_target/ 2>/dev/null || true
+          sudo cp --parents system/bin/charger extracted_target/ 2>/dev/null || true
+          
+          # 提取 system_ext 相关
+          sudo cp -r --parents system_ext/apex extracted_target/ 2>/dev/null || true
+          sudo cp --parents system_ext/etc/vintf/manifest.xml extracted_target/ 2>/dev/null || true
+
+          # 打包
+          echo "🗜️ 正在打包提取出的文件..."
+          cd extracted_target
+          sudo chown -R $USER:$USER .
+          7z a -tzip ../extracted_custom_files.zip *
+          
+          echo "✅ 提取并打包完成！"
+
+      - name: Generate Release Tag
+        id: tag
+        run: echo "release_tag=$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_OUTPUT
+
+      - name: Upload Extracted Files to Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: Specific-Extraction-${{ steps.tag.outputs.release_tag }}
+          name: "📦 原机型移植所需要的相关文件提取 - ${{ steps.read_props.outputs.mod_device }} (${{ steps.read_props.outputs.os_ver }})"
+          body: |
+            提取信息
+            - 机型代号: `${{ steps.read_props.outputs.mod_device }}`
+            - SOTA 版本: `${{ steps.read_props.outputs.xms_ver }}`
+            - 系统版本: `${{ steps.read_props.outputs.os_ver }}`
+            - 原ROM: ${{ github.event.inputs.rom_url }}
+
+            已成功提取以下内容:
+            - 📂 `/product/etc/device_features/`
+            - 📂 `/product/etc/displayconfig/`
+            - 📄 `/product/overlay/` 
+            - 📄 `/system/system/bin/charger` 
+            - 📂 `/system_ext/apex/`
+            - 📄 `/system_ext/etc/vintf/manifest.xml`
+            *(所有文件均保留了原有的绝对路径结构)*
+          files: extracted_custom_files.zip
+          draft: false
+          prerelease: false
