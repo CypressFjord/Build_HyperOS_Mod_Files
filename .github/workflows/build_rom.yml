@@ -34,9 +34,8 @@ jobs:
           echo "=== 1. 初始化环境 ==="
           export DEBIAN_FRONTEND=noninteractive
           sudo apt-get update -qq
-          sudo apt-get install -yqq aria2 p7zip-full
+          sudo apt-get install -yqq aria2 p7zip-full tree
           
-          # 赋予提取工具权限
           chmod -R +x tools/
 
       - name: Download ROM with Aria2
@@ -44,90 +43,123 @@ jobs:
           echo "📥 下载 ROM 中..."
           aria2c -x16 -s16 -j$(nproc) -U "Mozilla/5.0" -d . "${{ github.event.inputs.rom_url }}" -o rom.zip
 
-      - name: Extract Payload and Target Partitions
+      - name: Extract Payload (Safe Mode)
         run: |
           echo "📦 提取 Payload..."
           7z e rom.zip payload.bin > /dev/null
           rm rom.zip
           
-          echo "🛠️ 提取需要的四个分区: mi_ext,product,system,system_ext"
           mkdir -p extracted_images
-          ./tools/payload_extract -s -o extracted_images -i payload.bin -X mi_ext,product,system,system_ext -T0
+          echo "🛠️ 独立提取分区镜像"
+          
+          ./tools/payload_extract -s -o extracted_images -i payload.bin -X mi_ext -T0 || echo "⚠️ mi_ext 提取失败"
+          ./tools/payload_extract -s -o extracted_images -i payload.bin -X product -T0 || echo "⚠️ product 提取失败"
+          ./tools/payload_extract -s -o extracted_images -i payload.bin -X system -T0 || echo "⚠️ system 提取失败"
+          ./tools/payload_extract -s -o extracted_images -i payload.bin -X system_ext -T0 || echo "⚠️ system_ext 提取失败"
+          
           rm payload.bin
+          echo "📊 成功提取到的镜像："
+          ls -lh extracted_images/
 
       - name: Extract EROFS
         run: |
-          echo "📂 解包 EROFS 镜像..."
+          echo "📂 解包 EROFS 镜像 (按指定顺序: mi_ext, product, system, system_ext)..."
           mkdir -p mi_ext product system system_ext
           
-          cd mi_ext && sudo ../tools/extract.erofs -i ../extracted_images/mi_ext.img -x -s && cd ..
-          cd product && sudo ../tools/extract.erofs -i ../extracted_images/product.img -x -s && cd ..
-          cd system && sudo ../tools/extract.erofs -i ../extracted_images/system.img -x -s && cd ..
-          cd system_ext && sudo ../tools/extract.erofs -i ../extracted_images/system_ext.img -x -s && cd ..
+          if [ -f extracted_images/mi_ext.img ]; then
+            cd mi_ext && sudo ../tools/extract.erofs -i ../extracted_images/mi_ext.img -x -s && cd ..
+          fi
+          
+          if [ -f extracted_images/product.img ]; then
+            cd product && sudo ../tools/extract.erofs -i ../extracted_images/product.img -x -s && cd ..
+          fi
+          
+          if [ -f extracted_images/system.img ]; then
+            cd system && sudo ../tools/extract.erofs -i ../extracted_images/system.img -x -s && cd ..
+          fi
+          
+          if [ -f extracted_images/system_ext.img ]; then
+            cd system_ext && sudo ../tools/extract.erofs -i ../extracted_images/system_ext.img -x -s && cd ..
+          fi
           
           sudo rm -rf extracted_images
 
-      - name: Parse mi_ext build.prop
+      - name: Parse Global build.prop
         id: read_props
         run: |
-          echo "📖 读取 mi_ext/etc/build.prop 信息..."
-          PROP_FILE="mi_ext/etc/build.prop"
-          
-          # 设定默认值，防止由于找不到文件或属性导致空值
+          echo "📖 读取机型和版本信息..."
+          # 按指定的 mi_ext, product, system, system_ext 顺序去读取 build.prop
+          PROP_FILES="mi_ext/etc/build.prop product/etc/build.prop system/system/build.prop system/build.prop system_ext/etc/build.prop"
           MOD_DEVICE="未知"
           OS_VER="未知"
           XMS_VER="未知"
           
-          if [ -f "$PROP_FILE" ]; then
-            # 使用 grep 获取整行，cut 截取等号后面的值，tr 删除可能存在的 Windows 回车符 \r
-            VAL1=$(grep -m 1 "^ro.product.mod_device=" "$PROP_FILE" | cut -d'=' -f2 | tr -d '\r' || true)
-            [ -n "$VAL1" ] && MOD_DEVICE="$VAL1"
-            
-            VAL2=$(grep -m 1 "^ro.mi.os.version.incremental=" "$PROP_FILE" | cut -d'=' -f2 | tr -d '\r' || true)
-            [ -n "$VAL2" ] && OS_VER="$VAL2"
-            
-            VAL3=$(grep -m 1 "^ro.mi.xms.version.incremental=" "$PROP_FILE" | cut -d'=' -f2 | tr -d '\r' || true)
-            [ -n "$VAL3" ] && XMS_VER="$VAL3"
-          else
-            echo "⚠️ 警告：未找到 $PROP_FILE"
-          fi
+          for prop in $PROP_FILES; do
+            if [ -f "$prop" ]; then
+              echo "✅ 在 $prop 中搜寻信息..."
+              VAL1=$(grep -m 1 "^ro.product.mod_device=" "$prop" | cut -d'=' -f2 | tr -d '\r')
+              [ -n "$VAL1" ] && MOD_DEVICE="$VAL1"
+              
+              VAL2=$(grep -m 1 "^ro.mi.os.version.incremental=" "$prop" | cut -d'=' -f2 | tr -d '\r')
+              [ -n "$VAL2" ] && OS_VER="$VAL2"
+              
+              VAL3=$(grep -m 1 "^ro.mi.xms.version.incremental=" "$prop" | cut -d'=' -f2 | tr -d '\r')
+              [ -n "$VAL3" ] && XMS_VER="$VAL3"
+            fi
+          done
           
-          echo "获取到的信息："
-          echo "mod_device=$MOD_DEVICE"
-          echo "os_version=$OS_VER"
-          echo "xms_version=$XMS_VER"
-          
-          # 写入 Github Output，供后续步骤读取
           echo "mod_device=$MOD_DEVICE" >> $GITHUB_OUTPUT
           echo "os_ver=$OS_VER" >> $GITHUB_OUTPUT
           echo "xms_ver=$XMS_VER" >> $GITHUB_OUTPUT
 
-      - name: Collect Specific Target Files
+      - name: Collect Target Files by Exact Paths
         run: |
-          echo "🔍 收集指定的目标文件及文件夹..."
+          echo "🔍 按照指定绝对路径收集文件..."
           mkdir -p extracted_target
           
-          # 提取 product 相关
-          sudo cp -r --parents product/etc/device_features extracted_target/ 2>/dev/null || true
-          sudo cp -r --parents product/etc/displayconfig extracted_target/ 2>/dev/null || true
-          sudo cp --parents product/overlay/AospFrameworkResOverlay.apk extracted_target/ 2>/dev/null || true
-          sudo cp --parents product/overlay/DevicesAndroidOverlay.apk extracted_target/ 2>/dev/null || true
-          sudo cp --parents product/overlay/DevicesOverlay.apk extracted_target/ 2>/dev/null || true
-          sudo cp --parents product/overlay/MiuiFrameworkResOverlay.apk extracted_target/ 2>/dev/null || true
-          sudo cp --parents product/overlay/MiuiFrameworkTelephonyResOverlay.apk extracted_target/ 2>/dev/null || true
-          sudo cp --parents product/overlay/SettingsRroDeviceTypeOverlay.apk extracted_target/ 2>/dev/null || true
-
-          # 提取 system 相关
-          sudo cp --parents system/system/bin/charger extracted_target/ 2>/dev/null || true
-          sudo cp --parents system/bin/charger extracted_target/ 2>/dev/null || true
+          copy_file() {
+            if [ -e "$1" ]; then
+              sudo cp -r --parents "$1" extracted_target/
+              echo "✅ 成功抓取: $1"
+            else
+              echo "❌ 失败 (未找到): $1"
+            fi
+          }          
           
-          # 提取 system_ext 相关
-          sudo cp -r --parents system_ext/apex extracted_target/ 2>/dev/null || true
-          sudo cp --parents system_ext/etc/vintf/manifest.xml extracted_target/ 2>/dev/null || true
+          # 1. [mi_ext]
+          # (该分区当前无指定需要抓取的文件)
 
-          # 打包
+          # 2. [product]
+          copy_file "product/etc/device_features"
+          copy_file "product/etc/displayconfig"
+          
+          copy_file "product/overlay/AospFrameworkResOverlay.apk"
+          copy_file "product/overlay/DevicesAndroidOverlay.apk"
+          copy_file "product/overlay/DevicesOverlay.apk"
+          copy_file "product/overlay/MiuiFrameworkResOverlay.apk"
+          copy_file "product/overlay/MiuiFrameworkTelephonyResOverlay.apk"
+          copy_file "product/overlay/SettingsRroDeviceTypeOverlay.apk"
+          
+          # 3. [system]
+          copy_file "system/system/bin/charger"
+          
+          # 4. [system_ext]
+          copy_file "system_ext/apex"
+          copy_file "system_ext/etc/vintf/manifest.xml"
+          
+          # -------------------------------------------------------------------
+          
+          echo "📊 最终提取收集到的文件树预览："
+          tree extracted_target/ || ls -R extracted_target/
+          
           echo "🗜️ 正在打包提取出的文件..."
           cd extracted_target
+          
+          if [ -z "$(ls -A .)" ]; then
+             echo "⚠️ 警告：未找到任何目标文件，创建占位文件以防 7z 报错"
+             touch 未提取到任何文件.txt
+          fi
+          
           sudo chown -R $USER:$USER .
           7z a -tzip ../extracted_custom_files.zip *
           
@@ -141,14 +173,14 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: Specific-Extraction-${{ steps.tag.outputs.release_tag }}
-          name: "📦 原机型移植所需要的相关文件提取 - ${{ steps.read_props.outputs.mod_device }} (${{ steps.read_props.outputs.os_ver }})"
+          name: "📦 系统文件提取 - ${{ steps.read_props.outputs.mod_device }} (${{ steps.read_props.outputs.os_ver }})"
           body: |
             提取信息
             - 机型代号: `${{ steps.read_props.outputs.mod_device }}`
             - SOTA 版本: `${{ steps.read_props.outputs.xms_ver }}`
             - 系统版本: `${{ steps.read_props.outputs.os_ver }}`
             - 原ROM: ${{ github.event.inputs.rom_url }}
-
+            
             已成功提取以下内容:
             - 📂 `/product/etc/device_features/`
             - 📂 `/product/etc/displayconfig/`
@@ -156,7 +188,7 @@ jobs:
             - 📄 `/system/system/bin/charger` 
             - 📂 `/system_ext/apex/`
             - 📄 `/system_ext/etc/vintf/manifest.xml`
-            *(所有文件均保留了原有的绝对路径结构)*
+               所有文件均保留了原有的绝对路径结构
           files: extracted_custom_files.zip
           draft: false
           prerelease: false
