@@ -40,22 +40,22 @@ jobs:
 
       - name: Download ROM with Aria2
         run: |
-          echo "📥 下载 ROM 中..."
+          echo "📥 下载 ROM 中"
           aria2c -x16 -s16 -j$(nproc) -U "Mozilla/5.0" -d . "${{ github.event.inputs.rom_url }}" -o rom.zip
 
       - name: Extract Payload (Safe Mode)
         run: |
-          echo "📦 提取 Payload..."
+          echo "📦 提取 Payload"
           7z e rom.zip payload.bin > /dev/null
           rm rom.zip
           
           mkdir -p extracted_images
           echo "🛠️ 独立提取分区镜像"
           
-          ./tools/payload_extract -s -o extracted_images -i payload.bin -X mi_ext -T0 || echo "⚠️ mi_ext 提取失败"
-          ./tools/payload_extract -s -o extracted_images -i payload.bin -X product -T0 || echo "⚠️ product 提取失败"
-          ./tools/payload_extract -s -o extracted_images -i payload.bin -X system -T0 || echo "⚠️ system 提取失败"
-          ./tools/payload_extract -s -o extracted_images -i payload.bin -X system_ext -T0 || echo "⚠️ system_ext 提取失败"
+          ./tools/payload_extract -s -o extracted_images -i payload.bin -X mi_ext -T0 || true
+          ./tools/payload_extract -s -o extracted_images -i payload.bin -X product -T0 || true
+          ./tools/payload_extract -s -o extracted_images -i payload.bin -X system -T0 || true
+          ./tools/payload_extract -s -o extracted_images -i payload.bin -X system_ext -T0 || true
           
           rm payload.bin
           echo "📊 成功提取到的镜像："
@@ -63,103 +63,97 @@ jobs:
 
       - name: Extract EROFS
         run: |
-          echo "📂 解包 EROFS 镜像 (按指定顺序: mi_ext, product, system, system_ext)..."
+          echo "📂 解包 EROFS 镜像"
           mkdir -p mi_ext product system system_ext
           
           if [ -f extracted_images/mi_ext.img ]; then
             cd mi_ext && sudo ../tools/extract.erofs -i ../extracted_images/mi_ext.img -x -s && cd ..
           fi
-          
           if [ -f extracted_images/product.img ]; then
             cd product && sudo ../tools/extract.erofs -i ../extracted_images/product.img -x -s && cd ..
           fi
-          
           if [ -f extracted_images/system.img ]; then
             cd system && sudo ../tools/extract.erofs -i ../extracted_images/system.img -x -s && cd ..
           fi
-          
           if [ -f extracted_images/system_ext.img ]; then
             cd system_ext && sudo ../tools/extract.erofs -i ../extracted_images/system_ext.img -x -s && cd ..
           fi
-          
           sudo rm -rf extracted_images
 
       - name: Parse Global build.prop
         id: read_props
         run: |
-          echo "📖 读取机型和版本信息..."
-          # 按指定的 mi_ext, product, system, system_ext 顺序去读取 build.prop
-          PROP_FILES="mi_ext/etc/build.prop product/etc/build.prop system/system/build.prop system/build.prop system_ext/etc/build.prop"
+          echo "📖 全局读取 build.prop 信息"
           MOD_DEVICE="未知"
           OS_VER="未知"
           XMS_VER="未知"
           
+          # 全局动态搜索所有 build.prop，无视隐藏深度
+          PROP_FILES=$(sudo find mi_ext product system system_ext -name "build.prop" -type f 2>/dev/null || true)
+          
           for prop in $PROP_FILES; do
-            if [ -f "$prop" ]; then
-              echo "✅ 在 $prop 中搜寻信息..."
-              VAL1=$(grep -m 1 "^ro.product.mod_device=" "$prop" | cut -d'=' -f2 | tr -d '\r')
-              [ -n "$VAL1" ] && MOD_DEVICE="$VAL1"
-              
-              VAL2=$(grep -m 1 "^ro.mi.os.version.incremental=" "$prop" | cut -d'=' -f2 | tr -d '\r')
-              [ -n "$VAL2" ] && OS_VER="$VAL2"
-              
-              VAL3=$(grep -m 1 "^ro.mi.xms.version.incremental=" "$prop" | cut -d'=' -f2 | tr -d '\r')
-              [ -n "$VAL3" ] && XMS_VER="$VAL3"
-            fi
+            echo "✅ 正在检索: $prop"
+            VAL1=$(sudo grep -m 1 "^ro.product.mod_device=" "$prop" | cut -d'=' -f2 | tr -d '\r')
+            [ -n "$VAL1" ] && MOD_DEVICE="$VAL1"
+            
+            VAL2=$(sudo grep -m 1 "^ro.mi.os.version.incremental=" "$prop" | cut -d'=' -f2 | tr -d '\r')
+            [ -n "$VAL2" ] && OS_VER="$VAL2"
+            
+            VAL3=$(sudo grep -m 1 "^ro.mi.xms.version.incremental=" "$prop" | cut -d'=' -f2 | tr -d '\r')
+            [ -n "$VAL3" ] && XMS_VER="$VAL3"
           done
           
           echo "mod_device=$MOD_DEVICE" >> $GITHUB_OUTPUT
           echo "os_ver=$OS_VER" >> $GITHUB_OUTPUT
           echo "xms_ver=$XMS_VER" >> $GITHUB_OUTPUT
 
-      - name: Collect Target Files by Exact Paths
+      - name: Smart Collect Target Files
         run: |
-          echo "🔍 按照指定绝对路径收集文件..."
-          mkdir -p extracted_target
+          echo "🔍 智能搜索并重构标准的绝对路径结构"
+          # 提前搭建好你需要的纯净、标准目录框架
+          mkdir -p extracted_target/product/etc
+          mkdir -p extracted_target/product/overlay
+          mkdir -p extracted_target/system/system/bin
+          mkdir -p extracted_target/system_ext/etc/vintf
           
-          copy_file() {
-            if [ -e "$1" ]; then
-              sudo cp -r --parents "$1" extracted_target/
-              echo "✅ 成功抓取: $1"
-            else
-              echo "❌ 失败 (未找到): $1"
-            fi
-          }          
+          # 1. 抓取目录
+          echo "▶️ 提取目标文件夹"
+          DIR_FEAT=$(sudo find product -type d -name "device_features" 2>/dev/null | head -n 1)
+          if [ -n "$DIR_FEAT" ]; then sudo cp -r "$DIR_FEAT" extracted_target/product/etc/; echo "✅ 已抓取: $DIR_FEAT"; else echo "❌ 缺失: device_features"; fi
           
-          # 1. [mi_ext]
-          # (该分区当前无指定需要抓取的文件)
-
-          # 2. [product]
-          copy_file "product/etc/device_features"
-          copy_file "product/etc/displayconfig"
+          DIR_DISP=$(sudo find product -type d -name "displayconfig" 2>/dev/null | head -n 1)
+          if [ -n "$DIR_DISP" ]; then sudo cp -r "$DIR_DISP" extracted_target/product/etc/; echo "✅ 已抓取: $DIR_DISP"; else echo "❌ 缺失: displayconfig"; fi
           
-          copy_file "product/overlay/AospFrameworkResOverlay.apk"
-          copy_file "product/overlay/DevicesAndroidOverlay.apk"
-          copy_file "product/overlay/DevicesOverlay.apk"
-          copy_file "product/overlay/MiuiFrameworkResOverlay.apk"
-          copy_file "product/overlay/MiuiFrameworkTelephonyResOverlay.apk"
-          copy_file "product/overlay/SettingsRroDeviceTypeOverlay.apk"
+          DIR_APEX=$(sudo find system_ext -type d -name "apex" 2>/dev/null | head -n 1)
+          if [ -n "$DIR_APEX" ]; then sudo cp -r "$DIR_APEX" extracted_target/system_ext/; echo "✅ 已抓取: $DIR_APEX"; else echo "❌ 缺失: apex"; fi
           
-          # 3. [system]
-          copy_file "system/system/bin/charger"
+          # 2. 抓取 APKs
+          echo "▶️ 提取 Overlay APK"
+          APKS="AospFrameworkResOverlay.apk DevicesAndroidOverlay.apk DevicesOverlay.apk MiuiFrameworkResOverlay.apk MiuiFrameworkTelephonyResOverlay.apk SettingsRroDeviceTypeOverlay.apk"
+          for apk in $APKS; do
+              APK_PATH=$(sudo find product -type f -name "$apk" 2>/dev/null | head -n 1)
+              if [ -n "$APK_PATH" ]; then
+                  sudo cp "$APK_PATH" extracted_target/product/overlay/
+                  echo "✅ 已抓取: $APK_PATH"
+              else
+                  echo "❌ 缺失: $apk"
+              fi
+          done
           
-          # 4. [system_ext]
-          copy_file "system_ext/apex"
-          copy_file "system_ext/etc/vintf/manifest.xml"
+          # 3. 抓取具体文件
+          echo "▶️ 提取系统文件"
+          FILE_CHARGER=$(sudo find system -type f -name "charger" 2>/dev/null | head -n 1)
+          if [ -n "$FILE_CHARGER" ]; then sudo cp "$FILE_CHARGER" extracted_target/system/system/bin/; echo "✅ 已抓取: $FILE_CHARGER"; else echo "❌ 缺失: charger"; fi
           
-          # -------------------------------------------------------------------
+          # manifest.xml 由于系统中可能存在多个，使用 grep 匹配路径特征，确保提取正确
+          FILE_MANIFEST=$(sudo find system_ext -type f -name "manifest.xml" 2>/dev/null | grep "/vintf/" | head -n 1)
+          if [ -n "$FILE_MANIFEST" ]; then sudo cp "$FILE_MANIFEST" extracted_target/system_ext/etc/vintf/; echo "✅ 已抓取: $FILE_MANIFEST"; else echo "❌ 缺失: manifest.xml"; fi
           
-          echo "📊 最终提取收集到的文件树预览："
+          echo "📊 重构后的干净目录结构预览："
           tree extracted_target/ || ls -R extracted_target/
           
-          echo "🗜️ 正在打包提取出的文件..."
+          echo "🗜️ 正在打包提取出的文件"
           cd extracted_target
-          
-          if [ -z "$(ls -A .)" ]; then
-             echo "⚠️ 警告：未找到任何目标文件，创建占位文件以防 7z 报错"
-             touch 未提取到任何文件.txt
-          fi
-          
           sudo chown -R $USER:$USER .
           7z a -tzip ../extracted_custom_files.zip *
           
