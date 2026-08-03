@@ -35,7 +35,6 @@ jobs:
           export DEBIAN_FRONTEND=noninteractive
           sudo apt-get update -qq
           sudo apt-get install -yqq aria2 p7zip-full tree
-          
           chmod -R +x tools/
 
       - name: Download ROM with Aria2
@@ -51,12 +50,10 @@ jobs:
           
           mkdir -p extracted_images
           echo "🛠️ 独立提取分区镜像"
-          
           ./tools/payload_extract -s -o extracted_images -i payload.bin -X mi_ext -T0 || true
           ./tools/payload_extract -s -o extracted_images -i payload.bin -X product -T0 || true
           ./tools/payload_extract -s -o extracted_images -i payload.bin -X system -T0 || true
           ./tools/payload_extract -s -o extracted_images -i payload.bin -X system_ext -T0 || true
-          
           rm payload.bin
           echo "📊 成功提取到的镜像："
           ls -lh extracted_images/
@@ -64,8 +61,7 @@ jobs:
       - name: Extract EROFS
         run: |
           echo "📂 解包 EROFS 镜像"
-          mkdir -p mi_ext product system system_ext
-          
+          mkdir -p mi_ext product system system_ext        
           if [ -f extracted_images/mi_ext.img ]; then
             cd mi_ext && sudo ../tools/extract.erofs -i ../extracted_images/mi_ext.img -x -s && cd ..
           fi
@@ -86,23 +82,17 @@ jobs:
           echo "📖 全局读取 build.prop 信息"
           MOD_DEVICE="未知"
           OS_VER="未知"
-          XMS_VER="未知"
-          
-          # 全局动态搜索所有 build.prop，无视隐藏深度
+          XMS_VER="未知"          
           PROP_FILES=$(sudo find mi_ext product system system_ext -name "build.prop" -type f 2>/dev/null || true)
-          
           for prop in $PROP_FILES; do
             echo "✅ 正在检索: $prop"
             VAL1=$(sudo grep -m 1 "^ro.product.mod_device=" "$prop" | cut -d'=' -f2 | tr -d '\r')
-            [ -n "$VAL1" ] && MOD_DEVICE="$VAL1"
-            
+            [ -n "$VAL1" ] && MOD_DEVICE="$VAL1"            
             VAL2=$(sudo grep -m 1 "^ro.mi.os.version.incremental=" "$prop" | cut -d'=' -f2 | tr -d '\r')
-            [ -n "$VAL2" ] && OS_VER="$VAL2"
-            
+            [ -n "$VAL2" ] && OS_VER="$VAL2"           
             VAL3=$(sudo grep -m 1 "^ro.mi.xms.version.incremental=" "$prop" | cut -d'=' -f2 | tr -d '\r')
             [ -n "$VAL3" ] && XMS_VER="$VAL3"
-          done
-          
+          done          
           echo "mod_device=$MOD_DEVICE" >> $GITHUB_OUTPUT
           echo "os_ver=$OS_VER" >> $GITHUB_OUTPUT
           echo "xms_ver=$XMS_VER" >> $GITHUB_OUTPUT
@@ -110,24 +100,17 @@ jobs:
       - name: Smart Collect Target Files
         run: |
           echo "🔍 智能搜索并重构标准的绝对路径结构"
-          # 提前搭建好你需要的纯净、标准目录框架
           mkdir -p extracted_target/product/etc
           mkdir -p extracted_target/product/overlay
           mkdir -p extracted_target/system/system/bin
           mkdir -p extracted_target/system_ext/etc/vintf
-          
-          # 1. 抓取目录
           echo "▶️ 提取目标文件夹"
           DIR_FEAT=$(sudo find product -type d -name "device_features" 2>/dev/null | head -n 1)
-          if [ -n "$DIR_FEAT" ]; then sudo cp -r "$DIR_FEAT" extracted_target/product/etc/; echo "✅ 已抓取: $DIR_FEAT"; else echo "❌ 缺失: device_features"; fi
-          
+          if [ -n "$DIR_FEAT" ]; then sudo cp -r "$DIR_FEAT" extracted_target/product/etc/; echo "✅ 已抓取: $DIR_FEAT"; else echo "❌ 缺失: device_features"; fi          
           DIR_DISP=$(sudo find product -type d -name "displayconfig" 2>/dev/null | head -n 1)
-          if [ -n "$DIR_DISP" ]; then sudo cp -r "$DIR_DISP" extracted_target/product/etc/; echo "✅ 已抓取: $DIR_DISP"; else echo "❌ 缺失: displayconfig"; fi
-          
+          if [ -n "$DIR_DISP" ]; then sudo cp -r "$DIR_DISP" extracted_target/product/etc/; echo "✅ 已抓取: $DIR_DISP"; else echo "❌ 缺失: displayconfig"; fi         
           DIR_APEX=$(sudo find system_ext -type d -name "apex" 2>/dev/null | head -n 1)
-          if [ -n "$DIR_APEX" ]; then sudo cp -r "$DIR_APEX" extracted_target/system_ext/; echo "✅ 已抓取: $DIR_APEX"; else echo "❌ 缺失: apex"; fi
-          
-          # 2. 抓取 APKs
+          if [ -n "$DIR_APEX" ]; then sudo cp -r "$DIR_APEX" extracted_target/system_ext/; echo "✅ 已抓取: $DIR_APEX"; else echo "❌ 缺失: apex"; fi          
           echo "▶️ 提取 Overlay APK"
           APKS="AospFrameworkResOverlay.apk DevicesAndroidOverlay.apk DevicesOverlay.apk MiuiFrameworkResOverlay.apk MiuiFrameworkTelephonyResOverlay.apk SettingsRroDeviceTypeOverlay.apk"
           for apk in $APKS; do
@@ -139,24 +122,17 @@ jobs:
                   echo "❌ 缺失: $apk"
               fi
           done
-          
-          # 3. 抓取具体文件
           echo "▶️ 提取系统文件"
           FILE_CHARGER=$(sudo find system -type f -name "charger" 2>/dev/null | head -n 1)
-          if [ -n "$FILE_CHARGER" ]; then sudo cp "$FILE_CHARGER" extracted_target/system/system/bin/; echo "✅ 已抓取: $FILE_CHARGER"; else echo "❌ 缺失: charger"; fi
-          
-          # manifest.xml 由于系统中可能存在多个，使用 grep 匹配路径特征，确保提取正确
+          if [ -n "$FILE_CHARGER" ]; then sudo cp "$FILE_CHARGER" extracted_target/system/system/bin/; echo "✅ 已抓取: $FILE_CHARGER"; else echo "❌ 缺失: charger"; fi       
           FILE_MANIFEST=$(sudo find system_ext -type f -name "manifest.xml" 2>/dev/null | grep "/vintf/" | head -n 1)
-          if [ -n "$FILE_MANIFEST" ]; then sudo cp "$FILE_MANIFEST" extracted_target/system_ext/etc/vintf/; echo "✅ 已抓取: $FILE_MANIFEST"; else echo "❌ 缺失: manifest.xml"; fi
-          
+          if [ -n "$FILE_MANIFEST" ]; then sudo cp "$FILE_MANIFEST" extracted_target/system_ext/etc/vintf/; echo "✅ 已抓取: $FILE_MANIFEST"; else echo "❌ 缺失: manifest.xml"; fi          
           echo "📊 重构后的干净目录结构预览："
-          tree extracted_target/ || ls -R extracted_target/
-          
+          tree extracted_target/ || ls -R extracted_target/          
           echo "🗜️ 正在打包提取出的文件"
           cd extracted_target
           sudo chown -R $USER:$USER .
-          7z a -tzip ../extracted_custom_files.zip *
-          
+          7z a -tzip ../extracted_custom_files.zip *         
           echo "✅ 提取并打包完成！"
 
       - name: Generate Release Tag
