@@ -102,6 +102,7 @@ jobs:
           echo "🔍 智能搜索并重构标准的绝对路径结构"
           mkdir -p extracted_target/product/etc
           mkdir -p extracted_target/product/overlay
+          mkdir -p extracted_target/product/pangu/system/app
           mkdir -p extracted_target/system/system/bin
           mkdir -p extracted_target/system_ext/etc/vintf
           echo "▶️ 提取目标文件夹"
@@ -109,8 +110,10 @@ jobs:
           if [ -n "$DIR_FEAT" ]; then sudo cp -r "$DIR_FEAT" extracted_target/product/etc/; echo "✅ 已抓取: $DIR_FEAT"; else echo "❌ 缺失: device_features"; fi          
           DIR_DISP=$(sudo find product -type d -name "displayconfig" 2>/dev/null | head -n 1)
           if [ -n "$DIR_DISP" ]; then sudo cp -r "$DIR_DISP" extracted_target/product/etc/; echo "✅ 已抓取: $DIR_DISP"; else echo "❌ 缺失: displayconfig"; fi         
+          DIR_NFC=$(sudo find product -type d -name "app" 2>/dev/null | head -n 1)
+          if [ -n "$DIR_NFC" ]; then sudo cp -r "$DIR_NFC" extracted_target/product/pangu/system/; echo "✅ 已抓取: $DIR_NFC"; else echo "❌ 缺失: app"; fi       
           DIR_APEX=$(sudo find system_ext -type d -name "apex" 2>/dev/null | head -n 1)
-          if [ -n "$DIR_APEX" ]; then sudo cp -r "$DIR_APEX" extracted_target/system_ext/; echo "✅ 已抓取: $DIR_APEX"; else echo "❌ 缺失: apex"; fi          
+          if [ -n "$DIR_APEX" ]; then sudo cp -r "$DIR_APEX" extracted_target/system_ext/; echo "✅ 已抓取: $DIR_APEX"; else echo "❌ 缺失: apex"; fi   
           echo "▶️ 提取 Overlay APK"
           APKS="AospFrameworkResOverlay.apk DevicesAndroidOverlay.apk DevicesOverlay.apk MiuiFrameworkResOverlay.apk MiuiFrameworkTelephonyResOverlay.apk SettingsRroDeviceTypeOverlay.apk"
           for apk in $APKS; do
