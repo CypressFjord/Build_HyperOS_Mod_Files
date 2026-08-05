@@ -1,0 +1,240 @@
+name: 📦 Build_HyperOS_Mod_Files
+
+on:
+  workflow_dispatch:
+    inputs:
+      rom_url:
+        description: 'HyperOS的ROM卡刷包链接'
+        required: true
+        type: string
+permissions:
+  contents: write
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@v1.1.0
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Setup Environment
+        run: |
+          set -euo pipefail
+          echo "初始化环境"
+          export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update -qq
+          sudo apt-get install -yqq aria2 p7zip-full tree
+          chmod -R +x tools/
+
+      - name: Download ROM with Aria2
+        run: |
+          set -euo pipefail
+          echo "📥 下载 ROM"
+          aria2c -x16 -s16 -j$(nproc) \
+            --max-tries=5 --retry-wait=10 --timeout=30 \
+            --continue=true \
+            -U "Mozilla/5.0" -d . "${{ github.event.inputs.rom_url }}" -o rom.zip
+
+      - name: Extract Payload (Safe Mode)
+        run: |
+          set -euo pipefail
+          echo "📦 提取 Payload"
+          7z e rom.zip payload.bin > /dev/null
+          rm rom.zip
+          mkdir -p extracted_images
+          echo "🛠️ 并行提取分区镜像"
+          declare -A PIDS
+          for part in mi_ext product system system_ext; do
+            ./tools/payload_extract -s -o extracted_images -i payload.bin -X "$part" -T0 \
+              > "extract_${part}.log" 2>&1 &
+            PIDS[$part]=$!
+          done
+          FAILED=""
+          for part in "${!PIDS[@]}"; do
+            if ! wait "${PIDS[$part]}"; then
+              if [ ! -f "extracted_images/${part}.img" ]; then
+                FAILED="$FAILED $part"
+              fi
+            fi
+            echo "── ${part} 日志 ──"; cat "extract_${part}.log"
+          done
+          [ -n "$FAILED" ] && echo "⚠️ 以下分区未能提取（可能该 ROM 本就不含）：$FAILED"
+          rm payload.bin
+          echo "📊 成功提取到的镜像："
+          ls -lh extracted_images/
+
+      - name: Extract EROFS
+        run: |
+          set -euo pipefail
+          echo "📂 解包 EROFS 镜像"
+          mkdir -p mi_ext product system system_ext
+          PIDS=()
+          for part in mi_ext product system system_ext; do
+            if [ -f "extracted_images/${part}.img" ]; then
+              (
+                cd "$part"
+                sudo ../tools/extract.erofs -i "../extracted_images/${part}.img" -x -s
+              ) &
+              PIDS+=($!)
+            fi
+          done
+
+          FAIL=0
+          for pid in "${PIDS[@]:-}"; do
+            wait "$pid" || FAIL=1
+          done
+          if [ "$FAIL" -ne 0 ]; then
+            echo "❌ 存在 EROFS 解包失败，终止构建"
+            exit 1
+          fi
+          sudo rm -rf extracted_images
+
+      - name: Parse Global build.prop
+        id: read_props
+        run: |
+          set -euo pipefail
+          echo "📖 全局读取 build.prop 信息"
+          MOD_DEVICE="未知"
+          OS_VER="未知"
+          XMS_VER="未知"
+          PROP_FILES=$(sudo find mi_ext product system system_ext -name "build.prop" -type f 2>/dev/null || true)
+          for prop in $PROP_FILES; do
+            echo "✅ 正在检索: $prop"
+            VAL1=$(sudo grep -m 1 "^ro.product.mod_device=" "$prop" | cut -d'=' -f2 | tr -d '\r')
+            [ -n "$VAL1" ] && MOD_DEVICE="$VAL1"
+            VAL2=$(sudo grep -m 1 "^ro.mi.os.version.incremental=" "$prop" | cut -d'=' -f2 | tr -d '\r')
+            [ -n "$VAL2" ] && OS_VER="$VAL2"
+            VAL3=$(sudo grep -m 1 "^ro.mi.xms.version.incremental=" "$prop" | cut -d'=' -f2 | tr -d '\r')
+            [ -n "$VAL3" ] && XMS_VER="$VAL3"
+          done
+          echo "mod_device=$MOD_DEVICE" >> "$GITHUB_OUTPUT"
+          echo "os_ver=$OS_VER" >> "$GITHUB_OUTPUT"
+          echo "xms_ver=$XMS_VER" >> "$GITHUB_OUTPUT"
+          if [ "$MOD_DEVICE" = "未知" ] && [ "$OS_VER" = "未知" ]; then
+            echo "❌ 未能从任何 build.prop 中读取到版本信息，请检查上游 ROM 或提取逻辑"
+            exit 1
+          fi
+
+      - name: Smart Collect Target Files
+        run: |
+          set -euo pipefail
+          echo "🔍 智能搜索并重构标准的绝对路径结构"
+          mkdir -p extracted_target/product/etc
+          mkdir -p extracted_target/product/overlay
+          mkdir -p extracted_target/product/pangu/system/app
+          mkdir -p extracted_target/product/app
+          mkdir -p extracted_target/product/media
+          mkdir -p extracted_target/system/system/bin
+          mkdir -p extracted_target/system_ext/etc/vintf
+          collect_dir() {
+            local src_root="$1" name="$2" dest="$3"
+            local found
+            found=$(sudo find "$src_root" -type d -name "$name" 2>/dev/null | head -n 1)
+            if [ -n "$found" ]; then
+              sudo cp -r "$found" "$dest"
+              echo "✅ 已抓取: $found"
+            else
+              echo "❌ 缺失: $name"
+            fi
+          }
+          collect_file() {
+            local src_root="$1" name="$2" dest="$3" filter="${4:-}"
+            local found
+            if [ -n "$filter" ]; then
+              found=$(sudo find "$src_root" -type f -name "$name" 2>/dev/null | grep "$filter" | head -n 1)
+            else
+              found=$(sudo find "$src_root" -type f -name "$name" 2>/dev/null | head -n 1)
+            fi
+            if [ -n "$found" ]; then
+              sudo cp "$found" "$dest"
+              echo "✅ 已抓取: $found"
+            else
+              echo "❌ 缺失: $name"
+            fi
+          }
+          echo "▶️ 提取目标文件夹"
+          collect_dir product device_features extracted_target/product/etc/
+          collect_dir product displayconfig extracted_target/product/etc/
+          collect_dir product app extracted_target/product/pangu/system/
+          collect_dir system_ext apex extracted_target/system_ext/
+          collect_dir product CatchLog extracted_target/product/app/
+          collect_dir product LyraSdkApp extracted_target/product/app/
+          collect_dir product MiSound extracted_target/product/app/
+          collect_dir product MiuiCit extracted_target/product/app/
+          collect_dir product media extracted_target/product/
+          echo "▶️ 提取 Overlay APK"
+          for apk in AospFrameworkResOverlay.apk DevicesAndroidOverlay.apk DevicesOverlay.apk \
+                     MiuiFrameworkResOverlay.apk MiuiFrameworkTelephonyResOverlay.apk \
+                     SettingsRroDeviceTypeOverlay.apk; do
+            collect_file product "$apk" extracted_target/product/overlay/
+          done
+          echo "▶️ 提取系统文件"
+          collect_file system charger extracted_target/system/system/bin/
+          collect_file system_ext manifest.xml extracted_target/system_ext/etc/vintf/ "/vintf/"
+          echo "📊 重构后的干净目录结构预览："
+          tree extracted_target/ || ls -R extracted_target/
+          echo "🗜️ 正在打包提取出的文件"
+          cd extracted_target
+          sudo chown -R "$USER:$USER" .
+          7z a -tzip -mx=5 ../extracted_custom_files.zip *
+          echo "✅ 提取并打包完成！"
+
+      - name: Rename Archive
+        id: rename
+        env:
+          MOD_DEVICE: ${{ steps.read_props.outputs.mod_device }}
+          OS_VER: ${{ steps.read_props.outputs.os_ver }}
+        run: |
+          set -euo pipefail
+          SAFE_NAME=$(printf '%s%s' "$MOD_DEVICE" "$OS_VER" | tr -d '/\\:*?"<>|' | tr ' ' '_')
+          ZIP_NAME="${SAFE_NAME}.zip"
+          mv extracted_custom_files.zip "$ZIP_NAME"
+          echo "✅ 已重命名为: $ZIP_NAME"
+          echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Generate Release Tag
+        id: tag
+        run: echo "release_tag=$(date +'%Y.%m.%d-%H%M')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Extracted Files to Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: Specific-Extraction-${{ steps.tag.outputs.release_tag }}
+          name: "📦 移植文件提取 - ${{ steps.read_props.outputs.mod_device }} (${{ steps.read_props.outputs.os_ver }})"
+          body: |
+            提取信息
+            - 机型代号: `${{ steps.read_props.outputs.mod_device }}`
+            - SOTA 版本: `${{ steps.read_props.outputs.xms_ver }}`
+            - 系统版本: `${{ steps.read_props.outputs.os_ver }}`
+            - 原ROM: ${{ github.event.inputs.rom_url }}
+
+            已成功提取以下内容:
+            - 📂 `/product/etc/device_features/`
+            - 📂 `/product/etc/displayconfig/`
+            - 📄 `/product/overlay/`
+            - 📂 `/product/app/CatchLog/`
+            - 📂 `/product/app/LyraSdkApp/`
+            - 📂 `/product/app/MiSound/`
+            - 📂 `/product/app/MiuiCit/`
+            - 📂 `/product/media/`
+            - 📄 `/system/system/bin/charger`
+            - 📂 `/system_ext/apex/`
+            - 📄 `/system_ext/etc/vintf/manifest.xml`
+              所有文件均保留了原有的绝对路径结构
+          files: ${{ steps.rename.outputs.zip_name }}
+          draft: false
+          prerelease: false
