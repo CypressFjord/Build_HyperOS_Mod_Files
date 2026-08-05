@@ -103,29 +103,29 @@ jobs:
           fi
           sudo rm -rf extracted_images
 
-      - name: Parse Global build.prop
+      - name: Parse build.prop (mi_ext)
         id: read_props
         run: |
           set -euo pipefail
-          echo "📖 全局读取 build.prop 信息"
+          echo "📖 读取 mi_ext/build.prop 信息"
           MOD_DEVICE="未知"
           OS_VER="未知"
           XMS_VER="未知"
-          PROP_FILES=$(sudo find mi_ext product system system_ext -name "build.prop" -type f 2>/dev/null || true)
+          PROP_FILES=$(sudo find mi_ext -name "build.prop" -type f 2>/dev/null || true)
           for prop in $PROP_FILES; do
             echo "✅ 正在检索: $prop"
-            VAL1=$(sudo grep -m 1 "^ro.product.mod_device=" "$prop" | cut -d'=' -f2 | tr -d '\r')
+            VAL1=$(sudo grep -m 1 "^ro.product.mod_device=" "$prop" | cut -d'=' -f2 | tr -d '\r' || true)
             [ -n "$VAL1" ] && MOD_DEVICE="$VAL1"
-            VAL2=$(sudo grep -m 1 "^ro.mi.os.version.incremental=" "$prop" | cut -d'=' -f2 | tr -d '\r')
+            VAL2=$(sudo grep -m 1 "^ro.mi.os.version.incremental=" "$prop" | cut -d'=' -f2 | tr -d '\r' || true)
             [ -n "$VAL2" ] && OS_VER="$VAL2"
-            VAL3=$(sudo grep -m 1 "^ro.mi.xms.version.incremental=" "$prop" | cut -d'=' -f2 | tr -d '\r')
+            VAL3=$(sudo grep -m 1 "^ro.mi.xms.version.incremental=" "$prop" | cut -d'=' -f2 | tr -d '\r' || true)
             [ -n "$VAL3" ] && XMS_VER="$VAL3"
           done
           echo "mod_device=$MOD_DEVICE" >> "$GITHUB_OUTPUT"
           echo "os_ver=$OS_VER" >> "$GITHUB_OUTPUT"
           echo "xms_ver=$XMS_VER" >> "$GITHUB_OUTPUT"
           if [ "$MOD_DEVICE" = "未知" ] && [ "$OS_VER" = "未知" ]; then
-            echo "❌ 未能从任何 build.prop 中读取到版本信息，请检查上游 ROM 或提取逻辑"
+            echo "❌ 未能从 mi_ext/build.prop 中读取到版本信息，请检查上游 ROM 或提取逻辑"
             exit 1
           fi
 
@@ -155,7 +155,7 @@ jobs:
             local src_root="$1" name="$2" dest="$3" filter="${4:-}"
             local found
             if [ -n "$filter" ]; then
-              found=$(sudo find "$src_root" -type f -name "$name" 2>/dev/null | grep "$filter" | head -n 1)
+              found=$(sudo find "$src_root" -type f -name "$name" 2>/dev/null | grep "$filter" | head -n 1 || true)
             else
               found=$(sudo find "$src_root" -type f -name "$name" 2>/dev/null | head -n 1)
             fi
